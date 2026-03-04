@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>1942 – Pacific Ace</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -13,6 +14,7 @@ body {
   align-items: center;
   min-height: 100vh;
   font-family: 'Courier New', monospace;
+  overflow: hidden;
 }
 #hint {
   color: #556;
@@ -20,10 +22,14 @@ body {
   margin-bottom: 6px;
   letter-spacing: 1px;
 }
+@media (max-width: 500px), (pointer: coarse) {
+  #hint { display: none; }
+}
 canvas {
   display: block;
   border: 2px solid #1a3a5c;
   box-shadow: 0 0 40px rgba(0,80,200,0.4);
+  touch-action: none;
 }
 </style>
 </head>
@@ -37,6 +43,21 @@ const ctx    = canvas.getContext('2d');
 const W = 420, H = 620;
 canvas.width  = W;
 canvas.height = H;
+
+// ─── CANVAS SCALING ──────────────────────────────────────────────────────────
+function resize() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = Math.floor(W * scale) + 'px';
+  canvas.style.height = Math.floor(H * scale) + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+function clientToGame(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (clientX - r.left) / r.width * W,
+           y: (clientY - r.top)  / r.height * H };
+}
 
 // ─── AUDIO ──────────────────────────────────────────────────────────────────
 let AC;
@@ -94,6 +115,70 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => { keys[e.code] = false; });
 function clearJP() { for (const k in jp) delete jp[k]; }
+
+// ─── TOUCH INPUT ─────────────────────────────────────────────────────────────
+const FIRE_CX = W - 80, FIRE_CY = H - 100, FIRE_R = 52;
+const ROLL_L_CX = W - 155, ROLL_L_CY = H - 45, ROLL_L_R = 30;
+const ROLL_R_CX = W - 55,  ROLL_R_CY = H - 45, ROLL_R_R = 30;
+const JOY_R = 60, JOY_ZONE_X = W * 0.55;
+
+const touch = { joy: null, fire: false, rollL: false, rollR: false,
+                fireId: -1, rollLId: -1, rollRId: -1 };
+
+function dist2(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+function handleTouchStart(e) {
+  e.preventDefault();
+  if (!AC) initAC();
+  for (const t of e.changedTouches) {
+    const g = clientToGame(t.clientX, t.clientY);
+    if (STATE === 'menu' || STATE === 'gameover') { startGame(); return; }
+    if (g.x < JOY_ZONE_X) {
+      if (!touch.joy) {
+        touch.joy = { id: t.identifier, baseX: g.x, baseY: g.y, curX: g.x, curY: g.y, dx: 0, dy: 0 };
+      }
+    } else {
+      if (dist2(g.x, g.y, ROLL_L_CX, ROLL_L_CY) <= ROLL_L_R) {
+        touch.rollL = true; touch.rollLId = t.identifier; jp['KeyZ'] = true;
+      } else if (dist2(g.x, g.y, ROLL_R_CX, ROLL_R_CY) <= ROLL_R_R) {
+        touch.rollR = true; touch.rollRId = t.identifier; jp['KeyX'] = true;
+      } else if (dist2(g.x, g.y, FIRE_CX, FIRE_CY) <= FIRE_R) {
+        touch.fire = true; touch.fireId = t.identifier;
+      }
+    }
+  }
+}
+
+function handleTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (touch.joy && t.identifier === touch.joy.id) {
+      const g = clientToGame(t.clientX, t.clientY);
+      touch.joy.curX = g.x; touch.joy.curY = g.y;
+      const rawDx = g.x - touch.joy.baseX;
+      const rawDy = g.y - touch.joy.baseY;
+      const d = Math.hypot(rawDx, rawDy);
+      const clamped = Math.min(d, JOY_R);
+      touch.joy.dx = (d > 0 ? rawDx / d : 0) * (clamped / JOY_R);
+      touch.joy.dy = (d > 0 ? rawDy / d : 0) * (clamped / JOY_R);
+    }
+  }
+}
+
+function handleTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (touch.joy && t.identifier === touch.joy.id)   { touch.joy = null; }
+    if (t.identifier === touch.fireId)  { touch.fire  = false; touch.fireId  = -1; }
+    if (t.identifier === touch.rollLId) { touch.rollL = false; touch.rollLId = -1; }
+    if (t.identifier === touch.rollRId) { touch.rollR = false; touch.rollRId = -1; }
+  }
+}
+
+canvas.addEventListener('touchstart',  handleTouchStart,  { passive: false });
+canvas.addEventListener('touchmove',   handleTouchMove,   { passive: false });
+canvas.addEventListener('touchend',    handleTouchEnd,    { passive: false });
+canvas.addEventListener('touchcancel', handleTouchEnd,    { passive: false });
 
 // ─── GAME VARS ───────────────────────────────────────────────────────────────
 let STATE = 'menu';
@@ -400,10 +485,13 @@ const P = {
 
   update() {
     const mv = this.rolling ? 0 : 1;
-    if (keys['ArrowLeft']||keys['KeyA']) this.x -= this.sp*mv;
-    if (keys['ArrowRight']||keys['KeyD']) this.x += this.sp*mv;
-    if (keys['ArrowUp']||keys['KeyW'])   this.y -= this.sp*mv;
-    if (keys['ArrowDown']||keys['KeyS']) this.y += this.sp*mv;
+    const DEADZONE = 0.15;
+    const jdx = touch.joy ? touch.joy.dx : 0;
+    const jdy = touch.joy ? touch.joy.dy : 0;
+    if (keys['ArrowLeft']  || keys['KeyA'] || jdx < -DEADZONE) this.x -= this.sp * mv * (keys['ArrowLeft'] || keys['KeyA'] ? 1 : Math.abs(jdx));
+    if (keys['ArrowRight'] || keys['KeyD'] || jdx >  DEADZONE) this.x += this.sp * mv * (keys['ArrowRight'] || keys['KeyD'] ? 1 : Math.abs(jdx));
+    if (keys['ArrowUp']    || keys['KeyW'] || jdy < -DEADZONE) this.y -= this.sp * mv * (keys['ArrowUp']    || keys['KeyW'] ? 1 : Math.abs(jdy));
+    if (keys['ArrowDown']  || keys['KeyS'] || jdy >  DEADZONE) this.y += this.sp * mv * (keys['ArrowDown']  || keys['KeyS'] ? 1 : Math.abs(jdy));
     this.x = Math.max(this.w/2, Math.min(W-this.w/2, this.x));
     this.y = Math.max(this.h/2, Math.min(H-this.h/2, this.y));
 
@@ -425,7 +513,7 @@ const P = {
 
     // Shoot
     if (this.shootCD > 0) this.shootCD--;
-    if ((keys['Space']) && !this.rolling && this.shootCD <= 0) {
+    if ((keys['Space'] || touch.fire) && !this.rolling && this.shootCD <= 0) {
       firePB(this.x, this.y-this.h/2, this.shotType);
       this.shootCD = 13;
     }
@@ -817,6 +905,76 @@ function update() {
   clearJP();
 }
 
+// ─── TOUCH CONTROLS OVERLAY ──────────────────────────────────────────────────
+function drawTouchControls() {
+  if (STATE !== 'playing' && STATE !== 'paused') return;
+  ctx.save();
+
+  // Joystick
+  const jBase = touch.joy || { baseX: 95, baseY: H - 90 };
+  const jnx = touch.joy ? jBase.baseX + jBase.dx * JOY_R : jBase.baseX;
+  const jny = touch.joy ? jBase.baseY + jBase.dy * JOY_R : jBase.baseY;
+
+  // Base ring
+  ctx.beginPath();
+  ctx.arc(jBase.baseX, jBase.baseY, JOY_R, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fill();
+
+  // Nub
+  ctx.beginPath();
+  ctx.arc(jnx, jny, 22, 0, Math.PI * 2);
+  ctx.fillStyle = touch.joy ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.18)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // FIRE button
+  ctx.beginPath();
+  ctx.arc(FIRE_CX, FIRE_CY, FIRE_R, 0, Math.PI * 2);
+  ctx.fillStyle = touch.fire ? 'rgba(255,80,0,0.55)' : 'rgba(255,80,0,0.25)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,130,0,0.7)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,220,100,0.85)';
+  ctx.font = 'bold 15px "Courier New"';
+  ctx.textAlign = 'center';
+  ctx.fillText('FIRE', FIRE_CX, FIRE_CY + 5);
+
+  // Roll L button
+  ctx.beginPath();
+  ctx.arc(ROLL_L_CX, ROLL_L_CY, ROLL_L_R, 0, Math.PI * 2);
+  ctx.fillStyle = touch.rollL ? 'rgba(0,200,255,0.45)' : 'rgba(0,150,255,0.2)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(100,200,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(180,230,255,0.9)';
+  ctx.font = 'bold 11px "Courier New"';
+  ctx.textAlign = 'center';
+  ctx.fillText('◄RL', ROLL_L_CX, ROLL_L_CY + 4);
+
+  // Roll R button
+  ctx.beginPath();
+  ctx.arc(ROLL_R_CX, ROLL_R_CY, ROLL_R_R, 0, Math.PI * 2);
+  ctx.fillStyle = touch.rollR ? 'rgba(0,200,255,0.45)' : 'rgba(0,150,255,0.2)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(100,200,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(180,230,255,0.9)';
+  ctx.font = 'bold 11px "Courier New"';
+  ctx.textAlign = 'center';
+  ctx.fillText('RR►', ROLL_R_CX, ROLL_R_CY + 4);
+
+  ctx.restore();
+}
+
 // ─── RENDER ───────────────────────────────────────────────────────────────────
 function render() {
   ctx.clearRect(0,0,W,H);
@@ -836,7 +994,7 @@ function render() {
     ctrls.forEach((c,i)=>ctx.fillText(c, W/2, 240+i*23));
     if(Math.floor(frame/28)%2===0){
       ctx.fillStyle='#ffee00'; ctx.font='bold 15px "Courier New"';
-      ctx.fillText('PRESS SPACE TO START', W/2, H-55);
+      ctx.fillText('SPACE / TAP TO START', W/2, H-55);
     }
     ctx.fillStyle='#556'; ctx.font='11px "Courier New"';
     ctx.fillText(`BEST: ${String(hiScore).padStart(8,'0')}`, W/2, H-25);
@@ -850,12 +1008,13 @@ function render() {
   if(bossObj && !bossObj.dead) bossObj.draw();
   P.draw();
   drawHUD();
+  drawTouchControls();
 
   if(STATE==='gameover'){
     drawOverlay('GAME OVER','#ff2200',
       [`SCORE: ${String(score).padStart(8,'0')}`,
        score>=hiScore ? '✦ NEW HIGH SCORE ✦' : `BEST:  ${String(hiScore).padStart(8,'0')}`],
-      'PRESS SPACE TO RETRY');
+      'SPACE / TAP TO RETRY');
   }
   if(STATE==='paused'){
     ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,0,W,H);
